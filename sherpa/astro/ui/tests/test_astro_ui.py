@@ -16,22 +16,26 @@
 #  with this program; if not, write to the Free Software Foundation, Inc.,
 #  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
-
+import bisect
 import os
 import re
 import unittest
 import tempfile
+from itertools import izip
 
 import numpy
 from numpy.testing import assert_allclose
 
 from sherpa.utils import SherpaTest, SherpaTestCase
-from sherpa.utils import requires_data, requires_fits
+from sherpa.utils import requires_data, requires_fits, requires_xspec
 from sherpa.astro import ui
 from sherpa.data import Data1D
 from sherpa.astro.data import DataPHA
 
 import logging
+
+from sherpa.utils.err import ConfidenceErr
+
 logger = logging.getLogger("sherpa")
 
 
@@ -141,7 +145,7 @@ class test_more_ui(SherpaTestCase):
         from sherpa.astro.instrument import RMFModelPHA
         self.assertTrue(isinstance(m, RMFModelPHA))
 
-    #bug #38
+    # bug #38
     def test_bug38(self):
         ui.load_pha('3c273', self.pha3c273)
         ui.notice_id('3c273', 0.3, 2)
@@ -430,7 +434,8 @@ class test_save_arrays_base(SherpaTestCase):
         atol = 1e-5
         self.assertIsInstance(out, Data1D)
 
-        # remove potential dm syntax introduced by backend before checking for equality
+        # remove potential dm syntax introduced by backend before checking for
+        # equality
         out_name = re.sub("\[.*\]", "", out.name)
 
         self.assertEqual(out_name, ofh.name, msg="file name")
@@ -559,3 +564,93 @@ if __name__ == '__main__':
         datadir = None
 
     SherpaTest(ui).test(datadir=datadir)
+
+
+@requires_data
+@requires_fits
+@requires_xspec
+class test_get_draws_functional(SherpaTestCase):
+    def setUp(self):
+        self._old_logger_level = logger.getEffectiveLevel()
+        logger.setLevel(logging.ERROR)
+        ui.clean()
+
+    def tearDown(self):
+        if hasattr(self, '_old_logger_level'):
+            logger.setLevel(self._old_logger_level)
+        ui.clean()
+
+    def my_int_unc(self, stat, name, val):
+        try:
+            nloop = 1000
+            my_min = val
+            factor = 1.3
+            my_max = my_min * factor
+            for ii in xrange(3):
+                ui.int_unc(name, 1, min=my_min,
+                           max=my_max, nloop=nloop)
+                xxx = ui.get_int_unc().x
+                yyy = ui.get_int_unc().y
+                zzz = bisect.bisect_left(yyy, stat)
+                my_min = xxx[-1]
+                my_max = my_min * factor
+                if zzz != nloop:
+                    result = val - xxx[zzz]
+                    return result * result
+            return numpy.nan
+        except ConfidenceErr:
+            return numpy.nan
+
+    def calc_seeded_covariance(self, stat, fit_result):
+        result = []
+        for name, val in izip(fit_result.parnames, fit_result.parvals):
+            myval = self.my_int_unc(stat, name, val)
+            if numpy.isnan(myval):
+                myval = val * val * 0.2
+                if 0.0 == myval:
+                    myval = 1.0
+            result.append(myval)
+        return numpy.diag(numpy.asarray(result))
+
+    def test_thread(self):
+        """
+        adapted from data/scripts provided by AS
+        """
+        numpy.random.seed(0)
+        ui.set_stat('cash')
+        ui.set_method('simplex')
+        ui.load_data(self.make_path('12852.pi'))
+        ui.notice(0.5, 7.)
+        ui.set_model(ui.xsphabs.gal * ui.xszphabs.zabs * ui.powlaw1d.p1)
+        ui.set_par('gal.nh', 0.0857)
+        ui.set_par('zabs.nh', 0.906)
+        ui.set_par('p1.ampl', 1.1e-4)
+        ui.set_par('p1.gamma', 1.77)
+        ui.fit()
+        ui.covar()
+        stat_at_min = ui.calc_stat()
+        fit_result = ui.get_fit_results()
+        covar_matrix = self.calc_seeded_covariance(stat_at_min + 1, fit_result)
+        stat, accept, params = ui.get_draws(
+            1, niter=10, covar_matrix=covar_matrix)
+        expected_stat = numpy.array([456.7289, 462.343, 462.343, 462.343, 457.3803, 458.7127,
+                                     457.9489, 457.9489, 457.2057, 457.2057, 457.2057])
+        expected_accept = numpy.array(
+            [False, True, False, False, True, True, True, False, True, False, False])
+        expected_params = numpy.array([[5.48399664e-01, 7.90355115e-01, 7.90355115e-01, 7.90355115e-01, 5.54715870e-01,
+                                        4.52762994e-01, 2.35624880e-01, 2.35624880e-01, 2.31539120e-01, 2.31539120e-01,
+                                        2.31539120e-01],
+                                       [8.64135139e-01, 1.06541529e+00, 1.06541529e+00, 1.06541529e+00, 8.19701506e-01,
+                                        1.24790279e+00,
+                                           1.35979091e+00, 1.35979091e+00, 1.42195577e+00, 1.42195577e+00,
+                                        1.42195577e+00],
+                                       [1.77263979e+00, 1.69639590e+00, 1.69639590e+00, 1.69639590e+00, 1.89010071e+00,
+                                        1.79852046e+00,
+                                           1.81533031e+00, 1.81533031e+00, 1.94515910e+00, 1.94515910e+00,
+                                        1.94515910e+00],
+                                       [1.13064416e-04, 1.21949366e-04, 1.21949366e-04, 1.21949366e-04, 1.27840069e-04,
+                                        1.37475790e-04, 1.37222468e-04, 1.37222468e-04, 1.44041901e-04, 1.44041901e-04,
+                                        1.44041901e-04]])
+        numpy.testing.assert_almost_equal(expected_stat, stat, decimal=4)
+        numpy.testing.assert_equal(expected_accept, accept)
+        numpy.testing.assert_almost_equal(expected_params, params, decimal=4)
