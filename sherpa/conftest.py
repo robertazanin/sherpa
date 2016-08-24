@@ -46,7 +46,9 @@ known_warnings = {
         [
             r"unorderable dtypes.*",
             r"Non-string object detected for the array ordering.*",
-            r"using a non-integer number instead of an integer will result in an error in the future"
+            r"using a non-integer number instead of an integer will result in an error in the future",
+            r"Parameter name norm is deprecated for model RenamedPars, use ampl instead",
+            r"Parameter name NORM is deprecated for model ParameterCase, use ampl instead"
         ],
     UserWarning:
         [
